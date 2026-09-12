@@ -20,3 +20,9 @@
 minecraft-full/
 minecraft-full.tar.gz
 *.tar.gz
+
+# Paquete de la Lambda, se genera en cada plan
+.build/
+
+# Cache de Python generado al probar la Lambda
+__pycache__/

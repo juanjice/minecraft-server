@@ -12,7 +12,8 @@ locals {
   start_cron = var.schedule_days == "*" ? "cron(${local.start_minute} ${local.start_hour} * * ? *)" : "cron(${local.start_minute} ${local.start_hour} ? * ${var.schedule_days} *)"
   stop_cron  = var.schedule_days == "*" ? "cron(${local.stop_minute} ${local.stop_hour} * * ? *)" : "cron(${local.stop_minute} ${local.stop_hour} ? * ${var.schedule_days} *)"
 
-  schedule_state = var.enable_power_schedule ? "ENABLED" : "DISABLED"
+  start_state = var.enable_scheduled_start ? "ENABLED" : "DISABLED"
+  stop_state  = var.enable_scheduled_stop ? "ENABLED" : "DISABLED"
 }
 
 data "aws_iam_policy_document" "scheduler_assume" {
@@ -53,7 +54,7 @@ resource "aws_iam_role_policy" "scheduler_power" {
 resource "aws_scheduler_schedule" "start" {
   name        = "${var.project_name}-start"
   description = "Enciende el servidor de Minecraft a las ${var.start_time} (${var.timezone})"
-  state       = local.schedule_state
+  state       = local.start_state
 
   schedule_expression          = local.start_cron
   schedule_expression_timezone = var.timezone
@@ -80,7 +81,7 @@ resource "aws_scheduler_schedule" "start" {
 resource "aws_scheduler_schedule" "stop" {
   name        = "${var.project_name}-stop"
   description = "Apaga el servidor de Minecraft a las ${var.stop_time} (${var.timezone})"
-  state       = local.schedule_state
+  state       = local.stop_state
 
   schedule_expression          = local.stop_cron
   schedule_expression_timezone = var.timezone

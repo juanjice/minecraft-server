@@ -46,6 +46,9 @@ El despliegue esta en la seccion 6.
 | `network.tf` | Subnet, tabla de rutas, security group |
 | `main.tf` | AMI, llave SSH, instancia, IP elastica |
 | `scheduler.tf` | Horario de encendido y apagado, y su rol de IAM |
+| `start_link.tf` | Lambda con la pagina de encendido bajo demanda |
+| `budget.tf` | Alerta de presupuesto mensual por correo |
+| `lambda/start_server.py` | Codigo de la pagina de encendido |
 | `outputs.tf` | IP publica, direccion para los jugadores, comandos SSH |
 | `prod.tfvars.example` | Plantilla de configuracion, se copia a `prod.tfvars` |
 | `.env.example` | Plantilla del perfil de AWS, se copia a `.env` |
@@ -172,9 +175,13 @@ paga aparte es una IP elastica reservada y sin usar.
 
 ### Horario de encendido y apagado (`scheduler.tf`)
 
-Dos reglas de EventBridge Scheduler prenden y apagan la instancia a hora fija.
-Es la palanca de ahorro mas grande del proyecto: un servidor que solo esta
-encendido 9 horas al dia cuesta menos de la mitad (seccion 7).
+Dos reglas de EventBridge Scheduler pueden prender y apagar la instancia a hora
+fija. Con el apagado por inactividad y el enlace de encendido (subsecciones
+siguientes), el horario cumple otro papel: el **apagado programado** es un tope
+diario, por si la maquina queda prendida (por ejemplo, por una sesion SSH
+olvidada), y el **encendido programado viene desactivado**. Encender a hora fija
+choca con el apagado por inactividad: si a esa hora no entra nadie, la maquina se
+apaga a los 20 minutos y solo se paga el arranque.
 
 | Variable | Default | Que hace |
 |---|---|---|
@@ -182,7 +189,8 @@ encendido 9 horas al dia cuesta menos de la mitad (seccion 7).
 | `stop_time` | `02:00` | Hora de apagado |
 | `timezone` | `America/Bogota` | Zona horaria de los horarios y del sistema operativo |
 | `schedule_days` | `*` | Dias en que aplica: `*`, o `FRI-SUN`, o `MON,WED,FRI` |
-| `enable_power_schedule` | `true` | `false` deja las reglas creadas pero en estado `DISABLED` |
+| `enable_scheduled_start` | `false` | Encender a `start_time`. Apagado queda la regla creada en estado `DISABLED` |
+| `enable_scheduled_stop` | `true` | Apagar a `stop_time`, pase lo que pase |
 
 Las horas se escriben como `HH:MM` y Terraform arma la expresion cron, para no
 tener que pensar en el formato de 6 campos de AWS. `17:00` se convierte en
@@ -208,6 +216,105 @@ sistema baja systemd, systemd ejecuta el `ExecStop` del servicio y `mc-stop`
 guarda el mundo por RCON antes de que el proceso muera. AWS da unos minutos de
 gracia antes de forzar el corte, y `TimeoutStopSec=120` cabe en esa ventana. Lo
 que si pasa es que los jugadores conectados se caen sin aviso previo.
+
+### Apagado por inactividad
+
+Un timer de systemd en la maquina (`minecraft-idle.timer`) ejecuta
+`mc-idle-check` cada minuto. Si durante `idle_stop_minutes` seguidos (20 por
+defecto) no hay nadie conectado, la maquina se apaga sola. Es el cambio que mas
+ahorra: el costo pasa a depender de las horas que de verdad se juega, no de una
+ventana fija.
+
+- **Detecta jugadores contando conexiones TCP establecidas al puerto del juego**
+  con `ss`, no preguntando por RCON. Asi funciona aunque el servidor este pausado
+  por `pause-when-empty-seconds`, arrancando o caido. Los pings de la lista de
+  servidores de los clientes duran milisegundos y no mantienen la maquina
+  encendida.
+- **El contador vive en `/run`**, que se borra en cada arranque. Un contador
+  viejo nunca apaga una maquina recien prendida: siempre hay `idle_stop_minutes`
+  completos de margen para que alguien entre.
+- **No apaga con una sesion SSH abierta**, para no cortar un mantenimiento, **ni
+  a mitad de un respaldo**: `mc-backup` toma un candado con `flock` que el
+  chequeo respeta.
+- **Apaga con `systemctl poweroff`.** Apagar el sistema operativo desde dentro
+  detiene la instancia porque `instance_initiated_shutdown_behavior = "stop"`
+  esta explicito en `main.tf`. Es el default de AWS, pero con `"terminate"` ese
+  mismo apagado borraria la maquina y el mundo, asi que no se deja implicito.
+- El apagado sigue el camino ordenado de siempre: systemd ejecuta `mc-stop` y el
+  mundo se guarda.
+- `idle_stop_minutes = 0` lo desactiva. La validacion exige al menos 5, para no
+  crear un ciclo de encender y apagar antes de que el servidor termine de
+  arrancar.
+
+El valor queda escrito en `/etc/minecraft/minecraft.env` al crear la maquina.
+Como `user_data` no se vuelve a ejecutar, en una maquina existente se cambia en
+ese archivo (ver [OPERACION.md](OPERACION.md)).
+
+### Enlace de encendido (`start_link.tf`)
+
+Si la maquina se apaga sola, los jugadores tienen que poder prenderla sin cuenta
+de AWS. Para eso hay una Lambda con **Function URL**: una pagina web que muestra
+el estado del servidor y tiene un boton para encenderlo. El codigo esta en
+`lambda/start_server.py`, sin mas dependencias que la libreria estandar y
+`boto3`, que ya viene en el runtime. Terraform lo empaqueta con `archive_file`.
+
+- **Function URL y no API Gateway:** trae HTTPS, no suma recursos y no cuesta
+  nada. Lambda incluye 1 millon de invocaciones gratis al mes, siempre.
+- **Autenticacion por token.** La URL es publica, asi que el acceso se controla
+  con un token de 40 caracteres generado por `random_password`, que viaja en el
+  query string (`?token=...`). Se compara con `hmac.compare_digest` para que el
+  tiempo de respuesta no de pistas. Sin el token correcto la pagina responde 404.
+- **Ver es GET, encender es POST.** WhatsApp, Discord y Telegram abren con GET
+  cada enlace pegado en un chat para armar la vista previa. Si GET encendiera la
+  maquina, compartir el enlace bastaria para prenderla. Por eso GET solo muestra
+  el estado y el boton envia un formulario POST.
+- **Permisos minimos.** El rol solo puede `ec2:StartInstances` sobre esta
+  instancia, mas `ec2:DescribeInstances`, que AWS no permite restringir por
+  recurso. No puede apagar ni tocar nada mas. Si el token se filtra, lo peor que
+  pasa es que alguien prenda la maquina, que se vuelve a apagar sola a los 20
+  minutos.
+- **Encendida no es lo mismo que lista.** La pagina intenta abrir una conexion al
+  puerto del juego. Mientras no responde muestra "Cargando Minecraft" y se
+  refresca sola cada 10 segundos; cuando responde, muestra la direccion.
+- **Dos permisos de invocacion.** AWS exige para las Function URL publicas tanto
+  `lambda:InvokeFunctionUrl` como `lambda:InvokeFunction` restringido a llamadas
+  por URL (`invoked_via_function_url = true`). Sin los dos, la URL rechaza las
+  peticiones.
+- **Logs con retencion de 14 dias.** Por defecto CloudWatch guarda los logs para
+  siempre y cobra por almacenarlos, asi que el grupo se crea explicitamente.
+
+El token queda en `terraform.tfstate` y en las variables de entorno de la
+Lambda; ninguno de los dos va al repositorio. Para rotarlo:
+`terraform apply -var-file=prod.tfvars -replace=random_password.start_token`.
+
+### Alerta de presupuesto (`budget.tf`)
+
+AWS Budgets manda un correo cuando el gasto real del mes pasa del 80% y del 100%
+de `monthly_budget_usd`, y cuando el pronostico indica que el mes va a cerrar por
+encima del 100%. Las alertas por correo no tienen costo.
+
+| Variable | Default | Que hace |
+|---|---|---|
+| `monthly_budget_usd` | `15` | Tope mensual en USD |
+| `budget_alert_emails` | `[]` | Destinatarios. Vacio significa que no se crea la alerta |
+| `budget_filter_by_project_tag` | `false` | Contar solo el gasto con la etiqueta `Project` del proyecto |
+
+Atrapa lo que ningun otro mecanismo ve: el apagado desactivado por error, una
+sesion SSH olvidada, cobros extra por credito de CPU (la instancia usa
+`cpu_credits = unlimited`) o un recurso que quedo vivo.
+
+Tres limitaciones:
+
+- **No es en tiempo real.** AWS actualiza los datos de presupuesto hasta tres
+  veces al dia, asi que la alerta puede llegar horas despues del gasto.
+- **El pronostico necesita historial.** Las primeras semanas solo funcionan las
+  alertas por gasto real.
+- **Por defecto mide toda la cuenta.** Si hay otras cosas en ella,
+  `budget_filter_by_project_tag = true` filtra por la etiqueta `Project` que el
+  provider pone en todos los recursos. Antes hay que activarla como *cost
+  allocation tag* en la consola de Billing: tarda hasta 24 horas en aparecer,
+  solo cuenta el gasto posterior a la activacion y deja por fuera costos sin
+  etiqueta, como parte de la transferencia de datos.
 
 ### Metadatos (`metadata_options`)
 
@@ -324,6 +431,7 @@ Cuando termina deja la marca `/var/lib/minecraft-bootstrap-done`.
    - `mc-stop` — avisa en el chat, guarda el mundo y detiene; lo usa systemd
    - `mc-backup` — respaldo comprimido de los tres mundos con rotacion
    - `mc-update` — baja el ultimo build estable de Paper para la version fijada
+   - `mc-idle-check` — apaga la maquina tras `idle_stop_minutes` sin jugadores
 
 8. **server.jar.** Consulta la API de PaperMC
    (`fill.papermc.io/v3`), filtra el ultimo build del canal `STABLE` para la
@@ -416,11 +524,22 @@ Cuando termina deja la marca `/var/lib/minecraft-bootstrap-done`.
       al proceso: solo puede escribir en `/opt/minecraft` y en el directorio de
       respaldos.
 
-    Ademas queda un timer `minecraft-backup.timer` que corre `mc-backup` todos los
-    dias a las 04:30 y conserva 7 dias. `Persistent=true` hace que se ejecute al
-    encender si la maquina estaba apagada a esa hora.
+    Ademas quedan dos timers:
+
+    - `minecraft-backup.timer` corre `mc-backup` a las 04:30 y conserva 7 dias. A
+      esa hora la maquina casi siempre esta apagada, y `Persistent=true` hace que
+      el respaldo pendiente se ejecute al encender. Como en ese momento Paper esta
+      cargando el mundo, `mc-backup` espera a que RCON responda antes de
+      empaquetar, para no guardar archivos a medio escribir.
+    - `minecraft-idle.timer` corre `mc-idle-check` cada minuto (seccion 3,
+      *Apagado por inactividad*).
 
 14. **Marca de finalizacion** en `/var/lib/minecraft-bootstrap-done`.
+
+El script renderizado pesa unos 13 KB, y EC2 acepta hasta 16 KB de `user_data`.
+Si crece mas, cloud-init acepta el contenido comprimido: se reemplaza `user_data`
+por `user_data_base64 = base64gzip(local.user_data)` en `main.tf`, y se agrega
+`user_data_base64` al `ignore_changes`.
 
 ---
 
@@ -444,24 +563,44 @@ Al terminar, `terraform output` da la direccion para los jugadores y el comando
 de conexion. El servidor tarda entre 3 y 6 minutos mas en quedar jugable,
 mientras corre el bootstrap.
 
+El enlace de encendido es sensible y no se imprime junto con el resto:
+
+```bash
+terraform output -raw start_url
+```
+
+La alerta de presupuesto solo se crea si `budget_alert_emails` tiene al menos un
+correo; `terraform output budget_alert` dice si quedo activa.
+
+Ojo en el primer despliegue: el apagado por inactividad corre desde el principio.
+Si nadie se conecta al juego ni por SSH en los 20 minutos siguientes a que termine
+el bootstrap, la maquina se apaga. Para migrar un mundo basta con tener la sesion
+SSH abierta mientras se trabaja.
+
 Para el dia a dia desde aqui, ver [OPERACION.md](OPERACION.md).
 
 ---
 
 ## 7. Costos aproximados (us-east-1)
 
-| Concepto | Encendido 24/7 | Con horario 17:00-02:00 |
-|---|---|---|
-| `t4g.medium` on-demand | ~24.50 | ~9.20 |
-| 20 GiB gp3 | ~1.60 | ~1.60 |
-| IPv4 publica | ~3.65 | ~3.65 |
-| **Total USD/mes** | **~30** | **~14.50** |
+| Concepto | Encendido 24/7 | Horario 17:00-02:00 | Bajo demanda (~3 h/dia) |
+|---|---|---|---|
+| `t4g.medium` on-demand | ~24.50 | ~9.20 | ~3.00 |
+| 20 GiB gp3 | ~1.60 | ~1.60 | ~1.60 |
+| IPv4 publica | ~3.65 | ~3.65 | ~3.65 |
+| **Total USD/mes** | **~30** | **~14.50** | **~8.25** |
+
+La ultima columna es la configuracion actual: encendido con el enlace, apagado
+por inactividad y tope a las 02:00. Supone unas 3 horas reales de juego al dia;
+el computo sigue a las horas que de verdad se juega, y el peor caso es el de la
+columna del horario. Lambda, EventBridge Scheduler, la alerta de presupuesto y los
+logs quedan dentro de sus capas gratuitas con este volumen.
 
 El disco y la IP se pagan igual con la maquina apagada: el volumen EBS existe
 aunque nadie lo use, y una IP elastica sin instancia encendida tambien se cobra.
-Lo unico que se deja de pagar es el computo, que es justamente la mayor parte.
-Acortar la ventana o limitar `schedule_days` a los dias que de verdad se juega
-baja mas la cifra.
+Con el computo ya recortado, la IP elastica pasa a ser el 44% de la factura. La
+siguiente palanca es quitarla y usar DNS dinamico gratuito, porque una IP
+automatica solo se cobra mientras la maquina esta encendida.
 
 La otra palanca es un Savings Plan de 1 año, que descuenta entre 30% y 40% del
 computo. Ojo con combinarlas: un Savings Plan es un compromiso de gasto por hora
@@ -533,10 +672,11 @@ curl -L -o EssentialsX.jar "https://essentialsx.net/"   # descarga HTML, no un j
 
 Esas URLs son paginas web. Hay que usar el enlace directo al artefacto.
 
-**9. Monitoreo.** Dos alarmas de CloudWatch que avisen antes de que se note
-dentro del juego: `CPUCreditBalance` cerca de cero (la instancia burstable se
-quedo sin credito) y un chequeo de que el puerto 25565 responda. La memoria no
-aparece en CloudWatch sin el agente instalado.
+**9. Monitoreo.** El gasto ya lo vigila la alerta de presupuesto. Faltan dos
+alarmas de CloudWatch que avisen antes de que se note dentro del juego:
+`CPUCreditBalance` cerca de cero (la instancia burstable se quedo sin credito) y
+un chequeo de que el puerto 25565 responda. La memoria no aparece en CloudWatch
+sin el agente instalado.
 
 **10. Actualizaciones de seguridad.** `unattended-upgrades` viene activo en
 Ubuntu y aplica parches de seguridad, pero no reinicia solo. Revisar de vez en

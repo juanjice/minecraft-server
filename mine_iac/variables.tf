@@ -188,7 +188,12 @@ variable "minecraft_user" {
   default = "minecraft"
 }
 
-variable "enable_power_schedule" {
+variable "enable_scheduled_start" {
+  type    = bool
+  default = false
+}
+
+variable "enable_scheduled_stop" {
   type    = bool
   default = true
 }
@@ -221,4 +226,29 @@ variable "schedule_days" {
     condition     = can(regex("^(\\*|(MON|TUE|WED|THU|FRI|SAT|SUN)(-(MON|TUE|WED|THU|FRI|SAT|SUN))?(,(MON|TUE|WED|THU|FRI|SAT|SUN)(-(MON|TUE|WED|THU|FRI|SAT|SUN))?)*)$", var.schedule_days))
     error_message = "schedule_days debe ser * o dias en ingles abreviado, por ejemplo FRI-SUN o MON,WED,FRI."
   }
+}
+
+variable "idle_stop_minutes" {
+  type    = number
+  default = 20
+
+  validation {
+    condition     = var.idle_stop_minutes == 0 || var.idle_stop_minutes >= 5
+    error_message = "idle_stop_minutes debe ser 0 (desactivado) o al menos 5, para dar tiempo a que el servidor arranque."
+  }
+}
+
+variable "monthly_budget_usd" {
+  type    = number
+  default = 15
+}
+
+variable "budget_alert_emails" {
+  type    = list(string)
+  default = []
+}
+
+variable "budget_filter_by_project_tag" {
+  type    = bool
+  default = false
 }

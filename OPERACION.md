@@ -27,29 +27,74 @@ exactamente esa version del cliente.
 
 **Whitelist activa.** Quien no este en la lista no entra, aunque conozca la IP.
 
+**Casi siempre esta apagado.** Se enciende con un enlace y se apaga solo cuando
+nadie juega (seccion 2).
+
 ---
 
-## 2. Horario: el servidor se prende y se apaga solo
+## 2. Encender y apagar el servidor
 
-Para no pagar una maquina encendida cuando nadie juega, hay un horario automatico:
+Para no pagar una maquina encendida cuando nadie juega, el servidor pasa la mayor
+parte del tiempo **apagado**:
 
 | | |
 |---|---|
-| Se prende | 17:00 |
-| Se apaga | 02:00 |
-| Zona horaria | America/Bogota |
-| Dias | todos |
-
-Entre las 02:00 y las 17:00 el servidor esta apagado y no responde. Eso es normal,
-no es una falla.
+| Se prende | Con el enlace de encendido, cuando alguien quiere jugar |
+| Se apaga | Solo, despues de 20 minutos sin nadie conectado |
+| Tope diario | A las 02:00 (America/Bogota) se apaga siempre, haya gente o no |
 
 Cuando se apaga, el mundo se guarda automaticamente antes de que la maquina muera.
-Lo que no hay es aviso previo: quien este jugando a las 02:00 se cae de golpe.
+Lo que no hay es aviso previo: quien siga jugando a las 02:00 se cae de golpe.
 
-### Prenderlo fuera de horario
+### Encender con el enlace
+
+Es una pagina web que cualquier jugador puede abrir, tambien desde el celular:
+
+1. Abrir el enlace. Muestra el estado del servidor.
+2. Si esta apagado, tocar **Encender servidor**.
+3. La pagina se actualiza sola. En 2 o 3 minutos pasa por "Encendiendo" y
+   "Cargando Minecraft", y termina en **"Servidor encendido"** con la direccion
+   para entrar.
+
+Abrir el enlace no enciende nada por si solo: hace falta el boton. Por eso se
+puede pegar en un chat de WhatsApp o Discord sin que la vista previa del chat
+prenda la maquina.
+
+Quien administra el servidor obtiene el enlace desde `mine_iac/`:
+
+```bash
+terraform output -raw start_url
+```
+
+Compartirlo solo con los jugadores. Lo peor que puede hacer alguien que lo
+consiga es encender la maquina, que se vuelve a apagar sola si nadie entra.
+
+### Cambiar el enlace
+
+Si el enlace se filtro, se genera uno nuevo y el anterior deja de funcionar:
+
+```bash
+cd mine_iac
+terraform apply -var-file=prod.tfvars -replace=random_password.start_token
+terraform output -raw start_url
+```
+
+### El apagado automatico
+
+Cada minuto la maquina revisa si hay alguien conectado al juego. Tras 20 minutos
+seguidos sin nadie, se apaga sola.
+
+- **Una sesion SSH abierta la mantiene encendida**, para que no se apague a mitad
+  de un mantenimiento. Hay que cerrar la sesion al terminar, o la maquina queda
+  prendida hasta las 02:00.
+- **Nunca se apaga a mitad de un respaldo.**
+- Para ver cuando se apago por inactividad, dentro de la maquina:
+  `sudo journalctl -t minecraft-idle`.
+
+### Otras formas de prender o apagar
 
 Desde la consola de AWS: EC2 > Instances > seleccionar `minecraft-beta` >
-*Instance state* > **Start instance**. Queda jugable unos 2 minutos despues.
+*Instance state* > **Start instance** o **Stop instance**.
 
 Con la AWS CLI:
 
@@ -60,28 +105,39 @@ aws ec2 stop-instances  --instance-ids <ID-de-la-instancia>
 
 El ID se ve en la consola, o con `terraform output instance_id`.
 
-Prenderla a mano no cambia el horario: se va a apagar igual a las 02:00.
+### Cambiar los tiempos
 
-### Cambiar el horario
+**Minutos sin jugadores antes de apagar.** Este valor vive dentro de la maquina,
+asi que se cambia ahi y no hace falta reiniciar nada:
 
-Se edita `mine_iac/prod.tfvars` y se aplica. Esto si requiere Terraform:
+```bash
+sudo nano /etc/minecraft/minecraft.env      # IDLE_STOP_MINUTES=30
+```
+
+Con `0` se desactiva el apagado automatico. Conviene poner el mismo valor en
+`idle_stop_minutes` de `mine_iac/prod.tfvars` y aplicar: asi la pagina del enlace
+muestra el numero correcto y una maquina nueva nace con esa configuracion.
+
+**Tope diario y encendido programado.** Se editan en `mine_iac/prod.tfvars` y se
+aplican. Solo tocan las reglas del horario, no reinician nada:
 
 ```hcl
-start_time    = "15:00"
-stop_time     = "01:00"
-schedule_days = "FRI-SUN"    # solo viernes, sabado y domingo
-timezone      = "America/Bogota"
+stop_time              = "01:00"
+enable_scheduled_start = true       # ademas del enlace, prender a una hora fija
+start_time             = "18:00"
 ```
 
 ```bash
 cd mine_iac && terraform apply -var-file=prod.tfvars
 ```
 
-Es un cambio barato: solo toca las reglas del horario, no reinicia nada.
+Ojo con el encendido programado: si a esa hora no entra nadie, la maquina se
+apaga a los 20 minutos. Solo tiene sentido si a esa hora de verdad hay gente
+esperando.
 
-Para dejar el servidor encendido permanentemente,
-`enable_power_schedule = false`. Ojo: eso desactiva tambien el apagado, asi que
-la maquina se queda prendida cobrando hasta que alguien la apague a mano.
+Para dejar el servidor encendido permanentemente hacen falta las dos cosas:
+`IDLE_STOP_MINUTES=0` en la maquina y `enable_scheduled_stop = false` en
+`prod.tfvars`. La maquina queda cobrando hasta que alguien la apague a mano.
 
 ---
 
@@ -94,8 +150,9 @@ ssh -i ~/.ssh/minecraft_server ubuntu@<IP>
 La llave privada es `~/.ssh/minecraft_server` y tiene que estar en modo 600
 (`chmod 600 ~/.ssh/minecraft_server`). El usuario siempre es `ubuntu`.
 
-Si la maquina esta apagada por el horario, la conexion falla. Hay que prenderla
-primero.
+Si la maquina esta apagada, la conexion falla: prenderla primero con el enlace
+(seccion 2). Mientras la sesion SSH este abierta la maquina no se apaga por
+inactividad, pero el tope de las 02:00 si aplica.
 
 ---
 
@@ -179,8 +236,10 @@ avanzan con el servidor vacio. Con `-1` se desactiva.
 
 ## 5. Respaldos
 
-Hay un respaldo automatico **todos los dias a las 04:30** que conserva los
-ultimos 7 dias. Se guardan en `/var/backups/minecraft/`.
+Hay un respaldo automatico **una vez al dia** que conserva los ultimos 7 dias.
+Esta programado a las 04:30, pero a esa hora la maquina casi siempre esta apagada,
+asi que en la practica se hace apenas se vuelve a encender, cuando Minecraft
+termina de cargar. Se guardan en `/var/backups/minecraft/`.
 
 ```bash
 ls -lh /var/backups/minecraft/      # ver los respaldos disponibles
@@ -276,12 +335,12 @@ ya estan ahi. Paper ademas incluye `spark`, que sirve para medir rendimiento
 
 ### "No me conecta" / "Connection timed out"
 
-1. Revisar la hora. Entre 02:00 y 17:00 la maquina esta apagada a proposito
-   (seccion 2).
-2. Si deberia estar prendida, confirmar en la consola de AWS que el estado sea
-   *running*.
-3. Si acaba de prenderse, esperar 2 minutos: el servidor tarda en arrancar.
-4. Ya dentro de la maquina: `sudo systemctl status minecraft`.
+1. Lo mas probable es que este apagado. Abrir el enlace de encendido
+   (seccion 2) y ver que dice.
+2. Si la pagina dice **Servidor encendido** y aun asi no conecta, revisar que la
+   direccion y la version del cliente sean las correctas.
+3. Si se queda en **Cargando Minecraft** mas de 5 minutos, entrar a la maquina y
+   revisar `sudo systemctl status minecraft`.
 
 ### "Connection refused"
 
@@ -317,6 +376,22 @@ bajos, las causas tipicas son demasiadas entidades (mobs acumulados, granjas), u
 plugin pesado, o que la instancia se quedo sin credito de CPU. Lo primero se
 diagnostica con `/spark profiler` dentro del juego; lo ultimo, en CloudWatch con
 la metrica `CPUCreditBalance`.
+
+### La maquina se apago sola
+
+Es lo esperado si pasaron 20 minutos sin nadie conectado, o si son las 02:00
+(seccion 2). Para confirmarlo, en la siguiente sesion:
+
+```bash
+sudo journalctl -t minecraft-idle           # apagados por inactividad
+```
+
+Si alguien estaba jugando, no eran las 02:00 y la maquina se apago igual, eso si
+es una falla. Revisar ese mismo log y el arranque anterior del servidor:
+
+```bash
+sudo journalctl -u minecraft -b -1
+```
 
 ### El servidor se reinicia solo
 
@@ -363,12 +438,16 @@ la maquina. Para que esto no vuelva a pasar, ver la mejora 5 del
 ## 9. Referencia rapida
 
 ```bash
+# Enlace de encendido (en la maquina local, desde mine_iac/)
+terraform output -raw start_url
+
 # Conexion
 ssh -i ~/.ssh/minecraft_server ubuntu@<IP>
 
 # Estado
 sudo systemctl status minecraft
 sudo journalctl -u minecraft -f
+sudo journalctl -t minecraft-idle           # apagados por inactividad
 
 # Control
 sudo systemctl restart minecraft

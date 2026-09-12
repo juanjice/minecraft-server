@@ -30,8 +30,13 @@ op_players = [
   "JugadorUno",
 ]
 
-timezone              = "America/Bogota"
-enable_power_schedule = true
-start_time            = "17:00"
-stop_time             = "02:00"
-schedule_days         = "*"
+timezone               = "America/Bogota"
+enable_scheduled_start = false
+enable_scheduled_stop  = true
+start_time             = "17:00"
+stop_time              = "02:00"
+schedule_days          = "*"
+idle_stop_minutes      = 20
+
+monthly_budget_usd  = 15
+budget_alert_emails = ["tu-correo@ejemplo.com"]

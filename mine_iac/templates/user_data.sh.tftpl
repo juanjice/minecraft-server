@@ -56,6 +56,7 @@ SERVER_PORT=${server_port}
 RCON_PORT=${rcon_port}
 BACKUP_DIR=${backup_dir}
 BACKUP_RETENTION_DAYS=${backup_retention_days}
+IDLE_STOP_MINUTES=${idle_stop_minutes}
 ENVFILE
 chmod 0644 /etc/minecraft/minecraft.env
 
@@ -104,7 +105,19 @@ cat > /usr/local/bin/mc-backup <<'HELPER'
 # Respaldo comprimido de los tres mundos, con rotacion por antiguedad.
 set -euo pipefail
 . /etc/minecraft/minecraft.env
+# El candado evita dos respaldos a la vez y le indica a mc-idle-check que no apague.
+exec 9>/run/mc-backup.lock
+flock -n 9 || { echo "Ya hay un respaldo en curso" >&2; exit 1; }
 TS="$(date +%Y%m%d-%H%M%S)"
+# Con la maquina apagada a las 04:30, el timer recupera el respaldo al arrancar,
+# justo cuando Paper esta cargando el mundo. Se espera a que RCON responda para
+# no empaquetar archivos a medio escribir.
+if systemctl is-active --quiet minecraft; then
+  for _ in $(seq 1 36); do
+    timeout 10 /usr/local/bin/mc-cmd "list" >/dev/null 2>&1 && break
+    sleep 5
+  done
+fi
 # save-off evita que el servidor escriba chunks mientras se empaqueta.
 timeout 30 /usr/local/bin/mc-cmd "save-off" "save-all flush" >/dev/null 2>&1 || true
 trap 'timeout 30 /usr/local/bin/mc-cmd "save-on" >/dev/null 2>&1 || true' EXIT
@@ -112,6 +125,44 @@ tar -czf "$BACKUP_DIR/world-$TS.tar.gz" -C "$MC_DIR" \
   --ignore-failed-read world world_nether world_the_end
 find "$BACKUP_DIR" -name 'world-*.tar.gz' -mtime "+$BACKUP_RETENTION_DAYS" -delete
 echo "Respaldo listo: $BACKUP_DIR/world-$TS.tar.gz"
+HELPER
+
+cat > /usr/local/bin/mc-idle-check <<'HELPER'
+#!/usr/bin/env bash
+# Apaga la maquina si nadie juega durante IDLE_STOP_MINUTES seguidos.
+# Lo ejecuta minecraft-idle.timer cada minuto.
+set -euo pipefail
+. /etc/minecraft/minecraft.env
+
+# /run se borra en cada arranque: un contador viejo nunca apaga una maquina recien prendida.
+STATE=/run/minecraft-idle-since
+
+[ "$IDLE_STOP_MINUTES" -gt 0 ] || exit 0
+
+# Se cuentan conexiones TCP al puerto del juego en vez de preguntar por RCON:
+# funciona aunque el servidor este pausado, arrancando o caido.
+players="$(ss -Htn state established "( sport = :$SERVER_PORT )" | wc -l)"
+ssh_sessions="$(ss -Htn state established '( sport = :22 )' | wc -l)"
+
+if [ "$players" -gt 0 ] || [ "$ssh_sessions" -gt 0 ]; then
+  rm -f "$STATE"
+  exit 0
+fi
+
+# Nunca apagar a mitad de un respaldo.
+flock -n /run/mc-backup.lock true || exit 0
+
+now="$(date +%s)"
+if [ ! -f "$STATE" ]; then
+  echo "$now" > "$STATE"
+  exit 0
+fi
+
+idle_seconds=$(( now - $(cat "$STATE") ))
+if [ "$idle_seconds" -ge $(( IDLE_STOP_MINUTES * 60 )) ]; then
+  logger -t minecraft-idle "Sin jugadores hace $(( idle_seconds / 60 )) minutos, apagando la maquina"
+  systemctl poweroff
+fi
 HELPER
 
 cat > /usr/local/bin/mc-update <<'HELPER'
@@ -132,7 +183,8 @@ chown "$MC_USER:$MC_USER" "$MC_DIR/server.jar"
 systemctl start minecraft
 HELPER
 
-chmod 0755 /usr/local/bin/mc-cmd /usr/local/bin/mc-stop /usr/local/bin/mc-backup /usr/local/bin/mc-update
+chmod 0755 /usr/local/bin/mc-cmd /usr/local/bin/mc-stop /usr/local/bin/mc-backup /usr/local/bin/mc-update \
+  /usr/local/bin/mc-idle-check
 
 # ---------------------------------------------------------------- 8. server.jar (Paper)
 BUILDS_URL="https://fill.papermc.io/v3/projects/paper/versions/${minecraft_version}/builds"
@@ -311,9 +363,32 @@ RandomizedDelaySec=600
 WantedBy=timers.target
 UNIT
 
+cat > /etc/systemd/system/minecraft-idle.service <<'UNIT'
+[Unit]
+Description=Apagado de la maquina cuando no hay jugadores
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/mc-idle-check
+UNIT
+
+cat > /etc/systemd/system/minecraft-idle.timer <<'UNIT'
+[Unit]
+Description=Revision de inactividad del servidor de Minecraft
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target
+UNIT
+
 systemctl daemon-reload
 systemctl enable --now minecraft.service
 systemctl enable --now minecraft-backup.timer
+systemctl enable --now minecraft-idle.timer
 
 # ---------------------------------------------------------------- 14. Marca de finalizacion
 date -Is > /var/lib/minecraft-bootstrap-done

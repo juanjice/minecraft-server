@@ -49,12 +49,15 @@ locals {
     backup_dir            = var.backup_dir
     backup_retention_days = var.backup_retention_days
     backup_schedule       = var.backup_schedule
+    idle_stop_minutes     = var.idle_stop_minutes
   })
 }
 
 resource "aws_instance" "minecraft_beta" {
   ami           = data.aws_ami.ubuntu.id
   instance_type = var.instance_type
+
+  instance_initiated_shutdown_behavior = "stop"
 
   subnet_id              = aws_subnet.minecraft.id
   vpc_security_group_ids = [aws_security_group.minecraft.id]

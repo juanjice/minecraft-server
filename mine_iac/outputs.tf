@@ -22,9 +22,21 @@ output "rcon_tunnel_command" {
 }
 
 output "power_schedule" {
-  description = "Horario de encendido y apagado automatico."
-  value = var.enable_power_schedule ? format(
-    "enciende %s / apaga %s (%s), dias: %s",
-    var.start_time, var.stop_time, var.timezone, var.schedule_days
-  ) : "desactivado"
+  description = "Encendido y apagado automaticos."
+  value = format(
+    "encendido programado: %s | apagado programado: %s | apagado por inactividad: %s",
+    var.enable_scheduled_start ? "${var.start_time} ${var.timezone}, dias ${var.schedule_days}" : "no",
+    var.enable_scheduled_stop ? "${var.stop_time} ${var.timezone}, dias ${var.schedule_days}" : "no",
+    var.idle_stop_minutes > 0 ? "${var.idle_stop_minutes} min sin jugadores" : "no",
+  )
+}
+
+output "start_url" {
+  description = "Enlace para encender el servidor. Compartir solo con los jugadores."
+  value       = "${aws_lambda_function_url.start_link.function_url}?token=${random_password.start_token.result}"
+  sensitive   = true
+}
+
+output "budget_alert" {
+  value = length(var.budget_alert_emails) > 0 ? format("USD %s/mes, avisos a %d correo(s)", var.monthly_budget_usd, length(var.budget_alert_emails)) : "desactivada: falta budget_alert_emails"
 }
