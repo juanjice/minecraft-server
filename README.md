@@ -62,9 +62,6 @@ Todo vive en `mine_iac/`. El manual de operacion es `OPERACION.md`, en la raiz.
 
 ## 3. Decisiones de infraestructura
 
-Aqui quedan explicadas las razones que antes estaban como comentarios sueltos en
-los `.tf`.
-
 ### AMI (`data.aws_ami.ubuntu`)
 
 Es el sistema operativo donde vive el servidor. Se usa Ubuntu Server publicado
@@ -550,3 +547,11 @@ aparece en CloudWatch sin el agente instalado.
 Ubuntu y aplica parches de seguridad, pero no reinicia solo. Revisar de vez en
 cuando si hace falta reiniciar (`/var/run/reboot-required`); el servidor vuelve
 solo gracias a systemd.
+
+**11. Mejoas futuras.** Es plausible y relativamente sencillo por ejemplo comprar
+un dominio, para que apunte a la ip elastica, y de esta forma que los jugadores/amigos
+que ingresen al servidor pongan un dominio y el servidor tenga un nombre propiamente algo
+mas elegante que una ip , por ejemplo www.coinsterserver.com
+Tambien se puede forkear este proyecto para por ejemplo, correr el server bajo un cluster,
+y que tenga mas disponibilidad, o que prueda crecer el servidor propiamente tanto
+en disponibilidad como en optimizacion.
