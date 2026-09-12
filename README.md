@@ -548,10 +548,14 @@ Ubuntu y aplica parches de seguridad, pero no reinicia solo. Revisar de vez en
 cuando si hace falta reiniciar (`/var/run/reboot-required`); el servidor vuelve
 solo gracias a systemd.
 
-**11. Mejoas futuras.** Es plausible y relativamente sencillo por ejemplo comprar
-un dominio, para que apunte a la ip elastica, y de esta forma que los jugadores/amigos
-que ingresen al servidor pongan un dominio y el servidor tenga un nombre propiamente algo
-mas elegante que una ip , por ejemplo www.coinsterserver.com
-Tambien se puede forkear este proyecto para por ejemplo, correr el server bajo un cluster,
-y que tenga mas disponibilidad, o que prueda crecer el servidor propiamente tanto
-en disponibilidad como en optimizacion.
+**11. Mejoas futuras.** Este proyecto cubre lo esencial, pero hay varias líneas de trabajo naturales para extenderlo:
+
+Dominio propio. En lugar de compartir una IP, se puede registrar un dominio y apuntar un registro A a la Elastic IP, de modo que los jugadores se conecten a algo como coinsterserver.com. Si además se usa un puerto distinto al 25565, un registro SRV permite ocultarlo y mantener la dirección limpia.
+
+Backups automatizados. Programar snapshots del volumen EBS con Amazon Data Lifecycle Manager, de forma que exista un punto de restauración ante corrupción del mundo o borrados accidentales.
+
+Optimización de costos. Automatizar el encendido y apagado de la instancia según horarios de uso mediante EventBridge y Lambda, o exponer un mecanismo que permita a los jugadores levantarla bajo demanda.
+
+Despliegue continuo. Construir un pipeline en GitHub Actions que ejecute terraform plan en cada pull request y aplique los cambios al integrar a la rama principal, usando OIDC para autenticarse contra AWS sin credenciales de larga duración.
+
+Escalabilidad y disponibilidad. Un servidor de Minecraft es un proceso único y con estado, por lo que no admite escalado horizontal directo. La vía realista pasa por un proxy como Velocity o BungeeCord, que permite distribuir distintos mundos entre varias instancias detrás de una sola dirección de conexión.
