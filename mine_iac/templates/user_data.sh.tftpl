@@ -1,0 +1,320 @@
+#!/usr/bin/env bash
+#
+# Bootstrap de un servidor Minecraft (PaperMC) sobre Ubuntu en EC2.
+# cloud-init ejecuta este script UNA sola vez: en el primer arranque de la instancia.
+# Salida completa: /var/log/cloud-init-output.log
+#
+set -euo pipefail
+set -x
+
+MCRCON_VERSION="0.7.2"
+USER_AGENT="minecraft-iac/1.0"
+
+# ---------------------------------------------------------------- 1. Sistema base
+timedatectl set-timezone "${timezone}" || true
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+apt-get install -y --no-install-recommends \
+  curl jq ca-certificates tar gzip openssl gcc libc6-dev
+
+if ! apt-get install -y --no-install-recommends "${java_package}"; then
+  echo "AVISO: ${java_package} no disponible, se instala default-jre-headless" >&2
+  apt-get install -y --no-install-recommends default-jre-headless
+fi
+java -version
+
+# ---------------------------------------------------------------- 2. Swap
+# Red de seguridad contra OOM: si la JVM pide un pico de memoria, el kernel pagina
+# en disco en vez de matar el proceso del servidor.
+if [ "${swap_size_mb}" -gt 0 ] && [ ! -f /swapfile ]; then
+  fallocate -l "${swap_size_mb}M" /swapfile || dd if=/dev/zero of=/swapfile bs=1M count="${swap_size_mb}"
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+  grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+  echo 'vm.swappiness=10' > /etc/sysctl.d/99-minecraft.conf
+  sysctl --system || true
+fi
+
+# ---------------------------------------------------------------- 3. Usuario de servicio
+# El servidor NO corre como root ni como ubuntu: usuario propio, sin shell de login.
+id -u "${mc_user}" >/dev/null 2>&1 || \
+  useradd --system --user-group --create-home --home-dir "${mc_dir}" --shell /usr/sbin/nologin "${mc_user}"
+
+install -d -o "${mc_user}" -g "${mc_user}" -m 0755 "${mc_dir}"
+install -d -o "${mc_user}" -g "${mc_user}" -m 0755 "${mc_dir}/plugins"
+install -d -o "${mc_user}" -g "${mc_user}" -m 0750 "${backup_dir}"
+install -d -o root -g "${mc_user}" -m 0750 /etc/minecraft
+
+# ---------------------------------------------------------------- 4. Configuracion compartida
+cat > /etc/minecraft/minecraft.env <<'ENVFILE'
+MC_USER=${mc_user}
+MC_DIR=${mc_dir}
+MC_VERSION=${minecraft_version}
+SERVER_PORT=${server_port}
+RCON_PORT=${rcon_port}
+BACKUP_DIR=${backup_dir}
+BACKUP_RETENTION_DAYS=${backup_retention_days}
+ENVFILE
+chmod 0644 /etc/minecraft/minecraft.env
+
+# ---------------------------------------------------------------- 5. Password de RCON
+# Se genera EN la maquina: nunca viaja por terraform ni queda en el state.
+set +x
+if [ ! -f /etc/minecraft/rcon.env ]; then
+  printf 'RCON_PASSWORD=%s\n' "$(openssl rand -hex 24)" > /etc/minecraft/rcon.env
+fi
+chown root:"${mc_user}" /etc/minecraft/rcon.env
+chmod 0640 /etc/minecraft/rcon.env
+# shellcheck disable=SC1091
+. /etc/minecraft/rcon.env
+set -x
+
+# ---------------------------------------------------------------- 6. mcrcon
+# Cliente RCON de consola (Tiiffi/mcrcon). Se compila porque no esta en los repos de Ubuntu.
+if ! command -v mcrcon >/dev/null 2>&1; then
+  curl -fsSL -o /tmp/mcrcon.tar.gz \
+    "https://github.com/Tiiffi/mcrcon/archive/refs/tags/v$MCRCON_VERSION.tar.gz"
+  tar -xzf /tmp/mcrcon.tar.gz -C /tmp
+  gcc -std=gnu99 -O2 -s -o /usr/local/bin/mcrcon "/tmp/mcrcon-$MCRCON_VERSION/mcrcon.c"
+  chmod 0755 /usr/local/bin/mcrcon
+fi
+
+# ---------------------------------------------------------------- 7. Helpers de operacion
+cat > /usr/local/bin/mc-cmd <<'HELPER'
+#!/usr/bin/env bash
+# Envia comandos de consola al servidor via RCON.  Uso: sudo mc-cmd "list" "say hola"
+set -euo pipefail
+. /etc/minecraft/minecraft.env
+. /etc/minecraft/rcon.env
+exec /usr/local/bin/mcrcon -H 127.0.0.1 -P "$RCON_PORT" -p "$RCON_PASSWORD" "$@"
+HELPER
+
+cat > /usr/local/bin/mc-stop <<'HELPER'
+#!/usr/bin/env bash
+# Apagado ordenado: avisa, guarda el mundo y detiene.  Lo invoca systemd en ExecStop.
+set -uo pipefail
+timeout 30 /usr/local/bin/mc-cmd -w 5 \
+  "say Apagando el servidor, guardando el mundo" "save-all flush" "stop" || true
+HELPER
+
+cat > /usr/local/bin/mc-backup <<'HELPER'
+#!/usr/bin/env bash
+# Respaldo comprimido de los tres mundos, con rotacion por antiguedad.
+set -euo pipefail
+. /etc/minecraft/minecraft.env
+TS="$(date +%Y%m%d-%H%M%S)"
+# save-off evita que el servidor escriba chunks mientras se empaqueta.
+timeout 30 /usr/local/bin/mc-cmd "save-off" "save-all flush" >/dev/null 2>&1 || true
+trap 'timeout 30 /usr/local/bin/mc-cmd "save-on" >/dev/null 2>&1 || true' EXIT
+tar -czf "$BACKUP_DIR/world-$TS.tar.gz" -C "$MC_DIR" \
+  --ignore-failed-read world world_nether world_the_end
+find "$BACKUP_DIR" -name 'world-*.tar.gz' -mtime "+$BACKUP_RETENTION_DAYS" -delete
+echo "Respaldo listo: $BACKUP_DIR/world-$TS.tar.gz"
+HELPER
+
+cat > /usr/local/bin/mc-update <<'HELPER'
+#!/usr/bin/env bash
+# Actualiza el server.jar al ultimo build STABLE de Paper para la version configurada.
+set -euo pipefail
+. /etc/minecraft/minecraft.env
+UA="minecraft-iac/1.0"
+URL="$(curl -fsSL -H "User-Agent: $UA" \
+  "https://fill.papermc.io/v3/projects/paper/versions/$MC_VERSION/builds" \
+  | jq -r 'first(.[] | select(.channel == "STABLE") | .downloads."server:default".url) // empty')"
+[ -n "$URL" ] || { echo "Sin build STABLE para $MC_VERSION" >&2; exit 1; }
+/usr/local/bin/mc-backup
+systemctl stop minecraft
+curl -fsSL -H "User-Agent: $UA" -o "$MC_DIR/server.jar.new" "$URL"
+mv "$MC_DIR/server.jar.new" "$MC_DIR/server.jar"
+chown "$MC_USER:$MC_USER" "$MC_DIR/server.jar"
+systemctl start minecraft
+HELPER
+
+chmod 0755 /usr/local/bin/mc-cmd /usr/local/bin/mc-stop /usr/local/bin/mc-backup /usr/local/bin/mc-update
+
+# ---------------------------------------------------------------- 8. server.jar (Paper)
+BUILDS_URL="https://fill.papermc.io/v3/projects/paper/versions/${minecraft_version}/builds"
+JAR_URL="$(curl -fsSL -H "User-Agent: $USER_AGENT" "$BUILDS_URL" \
+  | jq -r 'first(.[] | select(.channel == "STABLE") | .downloads."server:default".url) // empty')"
+if [ -z "$JAR_URL" ]; then
+  echo "ERROR: no hay build STABLE de Paper para ${minecraft_version}" >&2
+  exit 1
+fi
+curl -fsSL -H "User-Agent: $USER_AGENT" -o "${mc_dir}/server.jar" "$JAR_URL"
+
+# ---------------------------------------------------------------- 9. EULA
+echo 'eula=true' > "${mc_dir}/eula.txt"
+
+# ---------------------------------------------------------------- 10. server.properties
+if [ ! -f "${mc_dir}/server.properties" ]; then
+cat > "${mc_dir}/server.properties" <<'PROPS'
+motd=${motd}
+server-port=${server_port}
+max-players=${max_players}
+gamemode=${gamemode}
+difficulty=${difficulty}
+level-name=world
+level-seed=${level_seed}
+view-distance=${view_distance}
+simulation-distance=${simulation_distance}
+spawn-protection=${spawn_protection}
+pause-when-empty-seconds=${pause_when_empty_seconds}
+white-list=${whitelist_enabled}
+enforce-whitelist=${whitelist_enabled}
+online-mode=${online_mode}
+enforce-secure-profile=${enforce_secure_profile}
+enable-rcon=true
+rcon.port=${rcon_port}
+rcon.password=__RCON_PASSWORD__
+broadcast-rcon-to-ops=false
+enable-command-block=${enable_command_block}
+PROPS
+  set +x
+  sed -i "s|__RCON_PASSWORD__|$RCON_PASSWORD|" "${mc_dir}/server.properties"
+  set -x
+fi
+chmod 0640 "${mc_dir}/server.properties"
+
+# ---------------------------------------------------------------- 11. whitelist.json / ops.json
+# El UUID de un jugador se calcula sin arrancar el servidor:
+#   online-mode=true  -> lo entrega la API de Mojang
+#   online-mode=false -> UUID v3 de MD5("OfflinePlayer:<nombre>"), que es exactamente
+#                        lo que hace el servidor internamente en modo offline.
+offline_uuid() {
+  local name="$1" md5 v6 v8
+  md5="$(printf 'OfflinePlayer:%s' "$name" | md5sum | cut -d' ' -f1)"
+  v6="$(printf '%02x' $(( (0x$${md5:12:2} & 0x0f) | 0x30 )))"
+  v8="$(printf '%02x' $(( (0x$${md5:16:2} & 0x3f) | 0x80 )))"
+  printf '%s-%s-%s%s-%s%s-%s' \
+    "$${md5:0:8}" "$${md5:8:4}" "$v6" "$${md5:14:2}" "$v8" "$${md5:18:2}" "$${md5:20:12}"
+}
+
+player_uuid() {
+  local name="$1" id
+  if [ "${online_mode}" = "true" ]; then
+    id="$(curl -fsSL "https://api.mojang.com/users/profiles/minecraft/$name" | jq -r '.id // empty')" || id=""
+    [ -n "$id" ] || { echo "AVISO: Mojang no conoce a $name, se omite" >&2; return 1; }
+    printf '%s-%s-%s-%s-%s' "$${id:0:8}" "$${id:8:4}" "$${id:12:4}" "$${id:16:4}" "$${id:20:12}"
+  else
+    offline_uuid "$name"
+  fi
+}
+
+WHITELIST_PLAYERS="${whitelist_players}"
+OP_PLAYERS="${op_players}"
+
+if [ ! -f "${mc_dir}/whitelist.json" ]; then
+  json='[]'
+  for name in $WHITELIST_PLAYERS; do
+    uuid="$(player_uuid "$name")" || continue
+    json="$(printf '%s' "$json" | jq --arg u "$uuid" --arg n "$name" '. + [{uuid: $u, name: $n}]')"
+  done
+  printf '%s\n' "$json" > "${mc_dir}/whitelist.json"
+fi
+
+if [ ! -f "${mc_dir}/ops.json" ]; then
+  json='[]'
+  for name in $OP_PLAYERS; do
+    uuid="$(player_uuid "$name")" || continue
+    json="$(printf '%s' "$json" | jq --arg u "$uuid" --arg n "$name" \
+      '. + [{uuid: $u, name: $n, level: 4, bypassesPlayerLimit: false}]')"
+  done
+  printf '%s\n' "$json" > "${mc_dir}/ops.json"
+fi
+
+# ---------------------------------------------------------------- 12. Flags de la JVM
+# Un @argfile de Java mantiene el unit de systemd legible.
+# Set de banderas G1 de Aikar: la referencia practica para servidores Minecraft.
+cat > "${mc_dir}/jvm.args" <<'ARGS'
+-Xms${java_xms}
+-Xmx${java_xmx}
+-XX:+UseG1GC
+-XX:+ParallelRefProcEnabled
+-XX:MaxGCPauseMillis=200
+-XX:+UnlockExperimentalVMOptions
+-XX:+DisableExplicitGC
+-XX:+AlwaysPreTouch
+-XX:G1NewSizePercent=30
+-XX:G1MaxNewSizePercent=40
+-XX:G1HeapRegionSize=8M
+-XX:G1ReservePercent=20
+-XX:G1HeapWastePercent=5
+-XX:G1MixedGCCountTarget=4
+-XX:InitiatingHeapOccupancyPercent=15
+-XX:G1MixedGCLiveThresholdPercent=90
+-XX:G1RSetUpdatingPauseTimePercent=5
+-XX:SurvivorRatio=32
+-XX:+PerfDisableSharedMem
+-XX:MaxTenuringThreshold=1
+-Dusing.aikars.flags=https://mcflags.emc.gs
+-Daikars.new.flags=true
+ARGS
+
+chown -R "${mc_user}:${mc_user}" "${mc_dir}"
+
+# ---------------------------------------------------------------- 13. systemd: autoarranque
+cat > /etc/systemd/system/minecraft.service <<'UNIT'
+[Unit]
+Description=Servidor Minecraft (PaperMC ${minecraft_version})
+Documentation=https://docs.papermc.io/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${mc_user}
+Group=${mc_user}
+WorkingDirectory=${mc_dir}
+ExecStart=/usr/bin/java @${mc_dir}/jvm.args -jar ${mc_dir}/server.jar nogui
+ExecStop=/usr/local/bin/mc-stop
+Restart=on-failure
+RestartSec=20
+TimeoutStopSec=120
+SuccessExitStatus=0 143
+OOMPolicy=continue
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=${mc_dir} ${backup_dir}
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+cat > /etc/systemd/system/minecraft-backup.service <<'UNIT'
+[Unit]
+Description=Respaldo del mundo de Minecraft
+After=minecraft.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/mc-backup
+UNIT
+
+cat > /etc/systemd/system/minecraft-backup.timer <<'UNIT'
+[Unit]
+Description=Respaldo diario del mundo de Minecraft
+
+[Timer]
+OnCalendar=${backup_schedule}
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now minecraft.service
+systemctl enable --now minecraft-backup.timer
+
+# ---------------------------------------------------------------- 14. Marca de finalizacion
+date -Is > /var/lib/minecraft-bootstrap-done
+echo "Bootstrap completado. Revisa: systemctl status minecraft"

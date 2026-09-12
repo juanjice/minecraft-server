@@ -1,0 +1,22 @@
+# Estado de Terraform: contiene IDs, IPs y metadatos de la cuenta.
+# Si algun dia se comparte el proyecto, esto va a un backend remoto (S3 + DynamoDB), no a git.
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.tfstate.lock.info
+
+# Variables y credenciales locales.
+# La configuracion real del servidor (nombres de jugadores, CIDR permitidos) se
+# queda fuera del repositorio: se parte de los archivos .example.
+.env
+*.tfvars
+!*.tfvars.example
+
+# Llaves SSH
+*.pem
+*.key
+
+# Respaldos del servidor: son cientos de MB, no pertenecen al repositorio
+minecraft-full/
+minecraft-full.tar.gz
+*.tar.gz

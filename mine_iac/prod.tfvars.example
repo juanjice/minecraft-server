@@ -1,0 +1,37 @@
+aws_region        = "us-east-1"
+availability_zone = "us-east-1a"
+project_name      = "minecraft"
+
+instance_type    = "t4g.medium"
+root_volume_size = 20
+java_xms         = "2600M"
+java_xmx         = "2600M"
+
+assign_elastic_ip   = true
+ssh_public_key_path = "~/.ssh/minecraft_server.pub"
+ssh_allowed_cidrs   = ["0.0.0.0/0"]
+
+minecraft_version = "1.21.11"
+motd              = "Servidor de Minecraft"
+max_players       = 12
+gamemode          = "survival"
+difficulty        = "easy"
+view_distance     = 10
+
+online_mode       = false
+whitelist_enabled = true
+
+whitelist_players = [
+  "JugadorUno",
+  "JugadorDos",
+]
+
+op_players = [
+  "JugadorUno",
+]
+
+timezone              = "America/Bogota"
+enable_power_schedule = true
+start_time            = "17:00"
+stop_time             = "02:00"
+schedule_days         = "*"
