@@ -549,8 +549,6 @@ Dominio propio. En lugar de compartir una IP, se puede registrar un dominio y ap
 
 Backups automatizados. Programar snapshots del volumen EBS con Amazon Data Lifecycle Manager, de forma que exista un punto de restauración ante corrupción del mundo o borrados accidentales.
 
-Optimización de costos. Automatizar el encendido y apagado de la instancia según horarios de uso mediante EventBridge y Lambda, o exponer un mecanismo que permita a los jugadores levantarla bajo demanda.
-
 Despliegue continuo. Construir un pipeline en GitHub Actions que ejecute terraform plan en cada pull request y aplique los cambios al integrar a la rama principal, usando OIDC para autenticarse contra AWS sin credenciales de larga duración.
 
 Escalabilidad y disponibilidad. Un servidor de Minecraft es un proceso único y con estado, por lo que no admite escalado horizontal directo. La vía realista pasa por un proxy como Velocity o BungeeCord, que permite distribuir distintos mundos entre varias instancias detrás de una sola dirección de conexión.
