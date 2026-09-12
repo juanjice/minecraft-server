@@ -1,10 +1,8 @@
 # Manual de operacion del servidor
 
-Todo lo que se hace con el servidor una vez esta creado: entrar, agregar gente,
-respaldar, actualizar y resolver problemas. No hace falta saber Terraform para
-nada de esto. Importante eso si, se recomienda una breve asesoria con una IA o 
-una personad e TI,para por ejemplo crear un presupuesto en aws, y que envie una
-alerta al correo si se pasa de cierto tope en dolares.
+Todo lo que se hace con el servidor una vez creado: entrar, agregar gente, respaldar, actualizar y resolver problemas. No hace falta saber Terraform para nada de esto.
+
+Antes de empezar, configura un presupuesto en AWS. El servidor genera costos mientras está encendido, y un error de configuración puede dispararlos sin aviso. AWS Budgets permite definir un tope mensual en dólares y recibir una alerta por correo al alcanzar cierto porcentaje del límite. Si no sabes cómo hacerlo, pide ayuda a alguien de TI o consúltalo con un asistente de IA; toma unos minutos y evita sorpresas en la factura.
 
 Para levantar o modificar la infraestructura, ver [README.md](README.md).
 
