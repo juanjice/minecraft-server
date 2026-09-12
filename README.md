@@ -5,11 +5,6 @@ instancia EC2, lista para jugar en cuanto termina de arrancar: Java instalado,
 servidor descargado, puerto abierto, whitelist sembrada, RCON configurado y
 autoarranque con systemd.
 
-No hay soporte para LocalStack. LocalStack no emula el arranque real de una EC2
-(no ejecuta `user_data`, no hay cloud-init, no hay red de verdad), asi que todo
-lo que importa en este proyecto es justamente lo que no se puede probar ahi. Se
-trabaja directo contra la nube.
-
 Este documento cubre la **infraestructura**: que se crea en AWS y por que. La
 operacion del dia a dia (entrar al servidor, whitelist, respaldos, horarios,
 que hacer si algo falla) esta en [OPERACION.md](OPERACION.md), escrito para
